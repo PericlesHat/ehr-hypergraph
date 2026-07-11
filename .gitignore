@@ -1,0 +1,28 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+
+# Virtual environments and local tooling
+.venv/
+venv/
+.env
+
+# Training outputs and local data artifacts
+outputs/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.pkl
+*.joblib
+*.csv
+*.parquet
+*.npy
+*.npz
+*.h5
+*.hdf5
+
+# Notebook and editor state
+.ipynb_checkpoints/
+.vscode/
+.idea/
