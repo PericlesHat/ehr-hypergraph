@@ -214,7 +214,8 @@ def initialize_dec_centers(
         for batch in loader:
             batch["times"] = batch["times"].to(device)
             batch["mask"] = batch["mask"].to(device)
-            z_list.append(model(batch, device)["z_patient"].cpu().numpy())
+            # KMeans runs on the subtype representation (== z_patient at this point, before the adapter trains).
+            z_list.append(model(batch, device)["z_subtype"].cpu().numpy())
     z = np.concatenate(z_list)
     if z.shape[0] < n_clusters:
         raise ValueError(f"Need at least {n_clusters} patients to initialize DEC centers; got {z.shape[0]}.")
@@ -353,6 +354,12 @@ def train_model(args: argparse.Namespace) -> tuple[EHRHyg, dict, dict, dict, Ste
         history["val_auc"].append(val_stats["visit_macro_auc"])
 
         val_auc = val_stats["visit_macro_auc"]
+        # Checkpoints become eligible for best-model selection only once the DEC centers have been
+        # initialised. Before that the centers are still their random initialisation, and restoring such a
+        # checkpoint would export clusters from untrained centers (the KMeans guard after the loop does not
+        # fire because dec_initialized is already True by then).
+        if not dec_initialized:
+            continue
         improved = best_state is None or (
             np.isfinite(val_auc) and (not np.isfinite(best_auc) or val_auc > best_auc)
         )

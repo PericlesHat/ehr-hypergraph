@@ -1,5 +1,5 @@
 """Model components for longitudinal EHR hypergraph learning."""
 
-from .ehr_hyg import EHRHyg, VisitHypergraphBackbone
+from .ehr_hyg import DEC, EHRHyg, SubtypeAdapter, VisitHypergraphBackbone
 
-__all__ = ["EHRHyg", "VisitHypergraphBackbone"]
+__all__ = ["DEC", "EHRHyg", "SubtypeAdapter", "VisitHypergraphBackbone"]
