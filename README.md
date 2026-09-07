@@ -23,7 +23,7 @@ ehr_hypergraph/
     dataset.py                Load visit files as longitudinal patient timelines
 
   models/
-    ehr_hyg.py                Hypergraph encoders, Transformer, and DEC clustering
+    ehr_hyg.py                Hypergraph encoders, Transformer, subtype adapter, and DEC clustering
 
   train.py                    Training entry point
   README.md                   This guide
@@ -211,6 +211,12 @@ OMOP event tables
 ```
 
 During a mini-batch forward pass, the model constructs the relevant incidence structure from the visits in that batch rather than storing one fixed cohort-wide adjacency matrix. The hypergraph encoder produces one embedding per visit; a causal Transformer then combines visit embeddings and visit timing into a patient representation. Prediction heads emit visit-level outcome logits, while the DEC head assigns a soft patient subtype probability.
+
+The two branches are asymmetrically decoupled:
+
+- **Prediction branch.** A linear head reads each visit's Transformer state and emits the outcome logits. The loss is a patient-balanced visit-level BCE: outcomes are averaged first, then the valid visits of each patient, then patients, so patients with many visits do not dominate.
+- **Subtyping branch.** The patient (CLS) state is detached and passed through a residual clustering adapter, `z_subtype = z + alpha * MLP(LayerNorm(z))` (the last layer is zero-initialised and `alpha` starts at 0.1, so `z_subtype == z_patient` at the start of training). DEC computes Student-t soft assignments of `z_subtype` to `K` learnable cluster centers. The DEC and balance losses therefore update only the adapter, `alpha` and the centers; prediction shapes the shared representation, but clustering gradients never modify the shared encoder.
+- **Warm-up and selection.** The first `5` epochs train the prediction branch only. Before epoch 6 the DEC centers are initialised by `KMeans(n_init=10)` on the training-set `z_subtype`; from epoch 6 on, prediction BCE, DEC KL and balance KL are optimised together. Only checkpoints from epochs after the DEC initialisation are eligible for best-model selection, so the exported clusters always come from initialised, trained centers.
 
 Two hypergraph backbones are available:
 

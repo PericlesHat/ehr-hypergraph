@@ -178,8 +178,40 @@ class DEC(nn.Module):
         return (q.t() / torch.sum(q, dim=1)).t()
 
 
+class SubtypeAdapter(nn.Module):
+    """Clustering-specific residual adapter on top of the (detached) patient representation.
+
+    z_subtype = z_detached + alpha * MLP(LayerNorm(z_detached))
+
+    The adapter's last layer is zero-initialised and alpha starts at 0.1, so at the beginning of training
+    z_subtype == z_patient.detach(). The clustering losses (DEC KL and cluster balance) update only this
+    adapter, alpha and the DEC centers; they never reach the shared prediction encoder.
+    """
+
+    def __init__(self, hidden_dim: int, alpha_init: float = 0.1) -> None:
+        super().__init__()
+        self.norm = nn.LayerNorm(hidden_dim)
+        self.fc1 = nn.Linear(hidden_dim, hidden_dim)
+        self.act = nn.GELU()
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        nn.init.zeros_(self.fc2.weight)
+        nn.init.zeros_(self.fc2.bias)
+        self.alpha = nn.Parameter(torch.tensor(float(alpha_init)))
+
+    def forward(self, z_patient: Tensor) -> Tensor:
+        z_detached = z_patient.detach()
+        residual = self.fc2(self.act(self.fc1(self.norm(z_detached))))
+        return z_detached + self.alpha * residual
+
+
 class EHRHyg(nn.Module):
-    """Longitudinal EHR model: visit hypergraph encoder + temporal Transformer."""
+    """Longitudinal EHR model: visit hypergraph encoder + temporal Transformer.
+
+    Prediction branch: visit-level outcome logits from the Transformer visit states (`z_visits`).
+    Subtyping branch: the patient CLS state (`z_patient`) is detached, passed through a residual
+    SubtypeAdapter, and clustered by DEC. Prediction shapes the shared representation; clustering
+    gradients cannot modify the shared encoder (prediction-informed, asymmetrically decoupled subtyping).
+    """
 
     def __init__(
         self,
@@ -200,6 +232,7 @@ class EHRHyg(nn.Module):
         self.cls_token = nn.Parameter(torch.randn(1, 1, hidden_dim))
         self.hidden_dim = hidden_dim
         self.hyg_backbone = hyg_backbone
+        self.subtype_adapter = SubtypeAdapter(hidden_dim)
         self.dec = DEC(n_clusters, hidden_dim)
         self.step_head = nn.Linear(hidden_dim, num_outcomes)
 
@@ -267,10 +300,12 @@ class EHRHyg(nn.Module):
         z = self.transformer(x_in, mask=causal_mask, src_key_padding_mask=pad_mask)
         z_patient = z[:, 0, :]
         z_visits = z[:, 1:, :]
+        z_subtype = self.subtype_adapter(z_patient)  # detached inside: no clustering gradient reaches the encoder
         return {
             "z_patient": z_patient,
             "z_visits": z_visits,
-            "q_subtype": self.dec(z_patient),
+            "z_subtype": z_subtype,
+            "q_subtype": self.dec(z_subtype),
             "step_logits": self.step_head(z_visits),
         }
 
