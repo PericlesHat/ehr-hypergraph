@@ -32,6 +32,7 @@ GRAD_CLIP_NORM = 1.0
 EARLY_STOPPING_PATIENCE = 10
 DEC_WARMUP_EPOCHS = 5
 DEC_KMEANS_N_INIT = 10
+DEC_CENTER_LR_MULT = 5.0
 LOSS_WEIGHTS = {"step": 1.0, "dec": 0.1, "reg": 0.02}
 
 
@@ -293,7 +294,25 @@ def train_model(args: argparse.Namespace) -> tuple[EHRHyg, dict, dict, dict, Ste
         n_clusters=args.n_clusters,
         hyg_backbone=args.backbone,
     ).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    # The DEC cluster centers are a small parameter block that only the clustering losses reach. At the shared
+    # learning rate their total Adam displacement over a run stays well below the distance between centers, so
+    # they never really leave their KMeans initialisation while the patient representation keeps moving. Give
+    # them a larger step, and no weight decay (decay would pull the centers toward the origin and away from the
+    # patient cloud).
+    center_lr_mult = DEC_CENTER_LR_MULT
+    if center_lr_mult == 1.0:
+        param_groups = [{"params": list(model.parameters())}]
+    else:
+        other_params = [p for p in model.parameters() if p is not model.dec.cluster_centers]
+        param_groups = [
+            {"params": other_params},
+            {"params": [model.dec.cluster_centers], "lr": LEARNING_RATE * center_lr_mult, "weight_decay": 0.0},
+        ]
+    optimizer = torch.optim.Adam(param_groups, lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+
+    def reset_center_optimizer_state() -> None:
+        """KMeans overwrites the centers in place, so the Adam moments accumulated for the old values are stale."""
+        optimizer.state.pop(model.dec.cluster_centers, None)
 
     print("Computing visit-level pos_weight ...", flush=True)
     train_labels = np.concatenate([dataset[i]["step_labels"] for i in train_ds.indices], axis=0)
@@ -305,6 +324,7 @@ def train_model(args: argparse.Namespace) -> tuple[EHRHyg, dict, dict, dict, Ste
     dec_initialized = False
     if DEC_WARMUP_EPOCHS <= 0:
         initialize_dec_centers(model, train_loader, device, args.n_clusters, DEC_KMEANS_N_INIT)
+        reset_center_optimizer_state()
         dec_initialized = True
     else:
         print(
@@ -319,6 +339,7 @@ def train_model(args: argparse.Namespace) -> tuple[EHRHyg, dict, dict, dict, Ste
     for epoch in trange(args.epochs, desc="Training"):
         if (not dec_initialized) and epoch >= DEC_WARMUP_EPOCHS:
             initialize_dec_centers(model, train_loader, device, args.n_clusters, DEC_KMEANS_N_INIT)
+            reset_center_optimizer_state()
             dec_initialized = True
 
         epoch_loss_w = loss_w if dec_initialized else {"step": loss_w["step"], "dec": 0.0, "reg": 0.0}
