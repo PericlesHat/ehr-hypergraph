@@ -274,8 +274,13 @@ class EHRHyg(nn.Module):
             x_emb = self.code_emb(torch.tensor(emb_ids, dtype=torch.long, device=device))
             edge_index = torch.tensor([local_nodes, hyper_edges], dtype=torch.long, device=device)
             visit_embeddings = self.visit_hg(x_emb, edge_index, num_hyperedges=edge_id)
-            for t, patient_index, visit_edge_id in edge_map:
-                x_seq[patient_index, t] = visit_embeddings[visit_edge_id]
+            # Scatter every visit embedding into its (patient, timestep) slot in one fused operation.
+            # Assigning them one at a time costs a separate GPU launch and a separate autograd node per
+            # visit in the batch, which dominates both the forward and the backward pass.
+            map_t = torch.tensor([m[0] for m in edge_map], dtype=torch.long, device=device)
+            map_p = torch.tensor([m[1] for m in edge_map], dtype=torch.long, device=device)
+            map_e = torch.tensor([m[2] for m in edge_map], dtype=torch.long, device=device)
+            x_seq = x_seq.index_put((map_p, map_t), visit_embeddings[map_e])
 
         times = batch["times"].to(device)
         x_seq = x_seq + self.time_proj(torch.log(times.unsqueeze(-1) + 1.0))
